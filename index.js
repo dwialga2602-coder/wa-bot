@@ -8,23 +8,19 @@ const openai = new OpenAI({
 });
 
 const client = new Client({
-    authStrategy: new LocalAuth(),
+    authStrategy: new LocalAuth({ dataPath: './session' }),
     puppeteer: {
         headless: true,
-        executablePath: '/usr/bin/google-chrome-stable',
         args: [
             "--no-sandbox",
             "--disable-setuid-sandbox",
             "--disable-dev-shm-usage",
             "--disable-accelerated-2d-canvas",
-            "--no-first-run",
             "--no-zygote",
-            "--single-process", // opsional, bisa dihapus kalau error
             "--disable-gpu"
         ]
     }
 });
-
 
 client.on("qr", qr => {
     qrcode.generate(qr, { small: true });
@@ -34,7 +30,14 @@ client.on("ready", () => {
     console.log("✅ Bot WhatsApp aktif!");
 });
 
-// Welcome message jika ada member baru
+client.on("auth_failure", msg => {
+    console.error("❌ Gagal login:", msg);
+});
+
+client.on("disconnected", reason => {
+    console.log("❌ Bot terputus:", reason);
+});
+
 client.on("group_join", async (notification) => {
     const chat = await notification.getChat();
     chat.sendMessage(`👋 Selamat datang @${notification.recipientIds[0].split("@")[0]} di grup *${chat.name}*!`, {
@@ -46,7 +49,6 @@ client.on("message", async message => {
     const chat = await message.getChat();
     fs.appendFileSync("chat-log.txt", `[${new Date().toISOString()}] ${message.from}: ${message.body}\n`);
 
-    // Anti-link: hapus pesan berisi link
     if (chat.isGroup && /(https?:\/\/|wa\.me|chat\.whatsapp\.com)/i.test(message.body)) {
         const sender = chat.participants.find(p => p.id._serialized === message.author);
         if (!sender?.isAdmin) {
