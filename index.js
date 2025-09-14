@@ -1,5 +1,7 @@
 const qrcode = require("qrcode-terminal");
+const QRCode = require("qrcode");
 const fs = require("fs");
+const http = require("http");
 const OpenAI = require("openai");
 const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
 
@@ -22,30 +24,45 @@ const client = new Client({
     }
 });
 
-client.on("qr", qr => {
+client.on("loading_screen", (percent, message) => {
+    console.log(`⏳ Loading ${percent}%: ${message}`);
+});
+
+client.on("qr", async qr => {
+    console.log("📷 QR code berhasil dibuat! Scan QR berikut:");
     qrcode.generate(qr, { small: true });
+    try {
+        await QRCode.toFile("./session/last-qr.png", qr);
+        console.log("✅ QR tersimpan di /session/last-qr.png, bisa diakses via /qr");
+    } catch (err) {
+        console.error("❌ Gagal menyimpan QR:", err);
+    }
+});
+
+client.on("auth_failure", async msg => {
+    console.error("❌ Auth gagal:", msg);
+    console.log("🔄 Menghapus session lama dan menunggu QR baru...");
+    fs.rmSync("./session", { recursive: true, force: true });
+    client.initialize();
 });
 
 client.on("ready", () => {
     console.log("✅ Bot WhatsApp aktif!");
 });
 
-client.on("auth_failure", msg => {
-    console.error("❌ Gagal login:", msg);
-});
-
-client.on("disconnected", reason => {
-    console.log("❌ Bot terputus:", reason);
-});
-
-client.on("group_join", async (notification) => {
-    const chat = await notification.getChat();
-    chat.sendMessage(`👋 Selamat datang @${notification.recipientIds[0].split("@")[0]} di grup *${chat.name}*!`, {
-        mentions: [notification.recipientIds[0]]
-    });
+client.on("disconnected", async reason => {
+    console.log("⚠️ Bot terputus:", reason);
+    console.log("🔄 Mencoba restart otomatis...");
+    try {
+        await client.initialize();
+        console.log("✅ Bot berhasil reconnect!");
+    } catch (e) {
+        console.error("❌ Gagal reconnect:", e);
+    }
 });
 
 client.on("message", async message => {
+    console.log("📩 Pesan masuk:", message.body);
     const chat = await message.getChat();
     fs.appendFileSync("chat-log.txt", `[${new Date().toISOString()}] ${message.from}: ${message.body}\n`);
 
@@ -110,16 +127,28 @@ client.on("message", async message => {
     }
 });
 
-const http = require("http");
-
+// Dummy HTTP server untuk Render
 const server = http.createServer((req, res) => {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("✅ WhatsApp Bot aktif!\n");
+    if (req.url === "/qr" && fs.existsSync("./session/last-qr.png")) {
+        res.writeHead(200, { "Content-Type": "image/png" });
+        fs.createReadStream("./session/last-qr.png").pipe(res);
+    } else {
+        res.writeHead(200, { "Content-Type": "text/plain" });
+        res.end("✅ WhatsApp Bot aktif! Akses QR di /qr\n");
+    }
 });
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🌐 Server dummy jalan di port ${PORT}`);
+});
+
+process.on("uncaughtException", (err) => {
+    console.error("💥 Uncaught Exception:", err);
+});
+
+process.on("unhandledRejection", (reason) => {
+    console.error("💥 Unhandled Rejection:", reason);
 });
 
 client.initialize();
