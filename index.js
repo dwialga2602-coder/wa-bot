@@ -1,7 +1,7 @@
-import { Client, LocalAuth, MessageMedia } from "whatsapp-web.js";
-import qrcode from "qrcode-terminal";
-import fs from "fs";
-import OpenAI from "openai";
+const qrcode = require("qrcode-terminal");
+const fs = require("fs");
+const OpenAI = require("openai");
+const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
 
 const openai = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY
