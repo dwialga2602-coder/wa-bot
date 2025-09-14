@@ -2,105 +2,160 @@ const qrcode = require("qrcode-terminal");
 const QRCode = require("qrcode");
 const fs = require("fs");
 const http = require("http");
+const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 const OpenAI = require("openai");
 const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
-const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const sessionPath = "session-bot1";
+try { fs.mkdirSync(sessionPath, { recursive: true }); } catch (e) {}
 
-const botsConfig = [
-  { name: "Bot1", session: "session-bot1", route: "/qr-bot1" },
-  { name: "Bot2", session: "session-bot2", route: "/qr-bot2" },
-  { name: "Bot3", session: "session-bot3", route: "/qr-bot3" },
-  { name: "Bot4", session: "session-bot4", route: "/qr-bot4" },
-  { name: "Bot5", session: "session-bot5", route: "/qr-bot5" }
+const activeQuizzes = {};
+const quizData = [
+  { question: "Ibukota Indonesia?", answer: "Jakarta" },
+  { question: "Hasil 5+7?", answer: "12" },
+  { question: "Planet merah?", answer: "Mars" },
 ];
 
-const clients = [];
+function getRandomQuiz() {
+  return quizData[Math.floor(Math.random() * quizData.length)];
+}
 
-// Regenerate QR if not scanned within 60s
-const qrTimers = {};
+// anti-spam cooldown
+const cooldown = new Set();
+function isOnCooldown(chatId) {
+  if (cooldown.has(chatId)) return true;
+  cooldown.add(chatId);
+  setTimeout(() => cooldown.delete(chatId), 3000);
+  return false;
+}
 
-function createClient(cfg) {
-  const client = new Client({
-    authStrategy: new LocalAuth({ dataPath: `./${cfg.session}` }),
-    puppeteer: {
-      headless: true,
-      args: ["--no-sandbox","--disable-setuid-sandbox"]
-    }
+const client = new Client({
+  authStrategy: new LocalAuth({ dataPath: `./${sessionPath}` }),
+  puppeteer: { headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] }
+});
+
+let qrTimer;
+
+client.on("qr", async qr => {
+  console.log(`\n📷 [BOT] QR CODE BARU! Scan dengan WhatsApp Web:`);
+  qrcode.generate(qr, { small: false });
+  try {
+    await QRCode.toFile(`./${sessionPath}/last-qr.png`, qr);
+    console.log(`✅ [BOT] QR tersimpan di /${sessionPath}/last-qr.png`);
+  } catch (err) {
+    console.error(`[BOT] ❌ Gagal simpan QR:`, err);
+  }
+  if (qrTimer) clearTimeout(qrTimer);
+  qrTimer = setTimeout(() => {
+    console.log(`⏳ [BOT] QR kadaluarsa, memicu refresh...`);
+    client.initialize();
+  }, 60000);
+});
+
+client.on("ready", () => {
+  console.log(`✅ [BOT] Bot aktif! Semua fitur siap.`);
+  if (qrTimer) clearTimeout(qrTimer);
+});
+
+client.on("group_join", notification => {
+  client.sendMessage(notification.id.remote, `👋 Selamat datang @${notification.recipientIds[0].split('@')[0]}!`, {
+    mentions: [notification.recipientIds[0]]
   });
+});
 
-  client.on("qr", async qr => {
-    console.log(`\n📷 [${cfg.name}] QR CODE BARU! Scan dengan WhatsApp Web:`);
-    qrcode.generate(qr, { small: false }); // besar supaya mudah terbaca
+client.on("message", async message => {
+  console.log(`[BOT] 📩 ${message.from}: ${message.body}`);
+  if (isOnCooldown(message.from)) return;
+
+  // auto sticker
+  if (message.hasMedia && message.caption === "!sticker") {
+    const media = await message.downloadMedia();
+    await client.sendMessage(message.from, media, { sendMediaAsSticker: true });
+    return;
+  }
+
+  // anti link
+  if (/chat\.whatsapp\.com/i.test(message.body)) {
+    message.delete(true);
+    client.sendMessage(message.from, "🚫 Link grup tidak diperbolehkan!");
+    return;
+  }
+
+  // AI chat
+  if (message.body.startsWith("!ai")) {
+    const prompt = message.body.slice(3).trim();
+    if (!prompt) return message.reply("❌ Contoh: !ai jelaskan apa itu AI");
     try {
-      await QRCode.toFile(`./${cfg.session}/last-qr.png`, qr);
-      console.log(`✅ [${cfg.name}] QR tersimpan di /${cfg.session}/last-qr.png`);
-    } catch (err) {
-      console.error(`[${cfg.name}] ❌ Gagal simpan QR:`, err);
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: prompt }]
+      });
+      await message.reply(completion.choices[0].message.content);
+    } catch (e) {
+      message.reply("⚠️ Gagal memproses AI: " + e.message);
     }
-    if (qrTimers[cfg.name]) clearTimeout(qrTimers[cfg.name]);
-    qrTimers[cfg.name] = setTimeout(() => {
-      console.log(`⏳ [${cfg.name}] QR kadaluarsa, memicu refresh...`);
-      client.initialize();
-    }, 60000);
-  });
+    return;
+  }
 
-  client.on("ready", () => {
-    console.log(`✅ [${cfg.name}] Bot aktif!`);
-    if (qrTimers[cfg.name]) clearTimeout(qrTimers[cfg.name]);
-  });
+  // AI gambar
+  if (message.body.startsWith("!img")) {
+    const prompt = message.body.slice(4).trim();
+    if (!prompt) return message.reply("❌ Contoh: !img kucing lucu pakai topi");
+    try {
+      const result = await openai.images.generate({
+        model: "gpt-image-1",
+        prompt,
+        size: "512x512"
+      });
+      const imgURL = result.data[0].url;
+      const response = await fetch(imgURL);
+      const buffer = Buffer.from(await response.arrayBuffer());
+      const media = new MessageMedia("image/png", buffer.toString("base64"));
+      await client.sendMessage(message.from, media, { caption: "🎨 Gambar selesai!" });
+    } catch (e) {
+      message.reply("⚠️ Gagal generate gambar: " + e.message);
+    }
+    return;
+  }
 
-  client.on("auth_failure", msg => {
-    console.error(`[${cfg.name}] ❌ Auth gagal:`, msg);
-    console.log(`[${cfg.name}] 🔄 Menghapus session untuk regen QR...`);
-    fs.rmSync(`./${cfg.session}`, { recursive: true, force: true });
-    client.initialize();
-  });
+  // quiz
+  if (message.body === "!quiz") {
+    const q = getRandomQuiz();
+    activeQuizzes[message.from] = q.answer.toLowerCase();
+    await message.reply(`❓ Quiz: ${q.question}`);
+    return;
+  }
 
-  client.on("disconnected", reason => {
-    console.log(`[${cfg.name}] ⚠️ Bot terputus: ${reason}`);
-    console.log(`[${cfg.name}] 🔄 Mencoba reconnect...`);
-    client.initialize();
-  });
+  if (activeQuizzes[message.from] && message.body.toLowerCase() === activeQuizzes[message.from]) {
+    await message.reply("✅ Benar!");
+    delete activeQuizzes[message.from];
+    return;
+  }
 
-  client.on("loading_screen", (percent, message) => {
-    console.log(`[${cfg.name}] ⏳ Loading ${percent}%: ${message}`);
-  });
+  if (message.body === "!menu") {
+    await message.reply(`📜 Menu Bot:\n!ai <prompt>\n!img <prompt>\n!quiz\n!sticker (kirim dengan gambar)\n!menu`);
+    return;
+  }
+});
 
-  client.on("message", message => {
-    console.log(`[${cfg.name}] 📩 Pesan dari ${message.from}: ${message.body}`);
-    if (message.body === "!ping") message.reply(`[${cfg.name}] Pong ✅`);
-  });
-
-  client.initialize();
-  return client;
-}
-
-for (const cfg of botsConfig) {
-  try { fs.mkdirSync(`./${cfg.session}`, { recursive: true }); } catch(e){}
-  const c = createClient(cfg);
-  clients.push({ name: cfg.name, client: c });
-}
+client.initialize();
 
 const server = http.createServer((req, res) => {
-  const found = botsConfig.find(b => req.url === b.route);
-  if (found) {
-    const path = `./${found.session}/last-qr.png`;
+  if (req.url === "/qr") {
+    const path = `./${sessionPath}/last-qr.png`;
     if (fs.existsSync(path)) {
       res.writeHead(200, { "Content-Type": "image/png" });
       fs.createReadStream(path).pipe(res);
     } else {
       res.writeHead(404);
-      res.end("QR belum tersedia, cek log untuk scan QR.");
+      res.end("QR belum tersedia, cek log.");
     }
     return;
   }
   res.writeHead(200, { "Content-Type": "text/plain" });
-  res.end("✅ WhatsApp multi-bot debug aktif! QR otomatis refresh setiap 60 detik.\n");
+  res.end("✅ WhatsApp bot aktif! Fitur lengkap tersedia.\n");
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`🌐 Server dummy jalan di port ${PORT}`);
-});
+server.listen(PORT, () => console.log(`🌐 Server jalan di port ${PORT}`));

@@ -1,6 +1,6 @@
 {
-  "name": "whatsapp-bot-5-debug",
-  "version": "2.0.1",
+  "name": "whatsapp-bot-1-full",
+  "version": "1.0.0",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
