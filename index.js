@@ -110,4 +110,16 @@ client.on("message", async message => {
     }
 });
 
+const http = require("http");
+
+const server = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("✅ WhatsApp Bot aktif!\n");
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+    console.log(`🌐 Server dummy jalan di port ${PORT}`);
+});
+
 client.initialize();
